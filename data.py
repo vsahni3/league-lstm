@@ -3,6 +3,9 @@ import json
 import pickle
 from torch.utils.data import Dataset
 import torch
+from functools import lru_cache
+import bisect
+
 def convert_json_to_jsonl(json_file, jsonl_file):
     """
     Convert a large JSON list to JSONL format.
@@ -43,25 +46,50 @@ def access_jsonl_by_offset(jsonl_file, offsets, line_index):
         line = f.readline()
         return json.loads(line)  # Parse and return the JSON object
 
+def compute_index_map(jsonl_file, offsets, fraction):
+    indices = []
+    count = 0
+    for i in range(len(offsets)):
+        data = access_jsonl_by_offset(jsonl_file, offsets, i)['stats_per_minute']
+        start_idx = round(len(data) * fraction)
+        count += len(data) - start_idx
+        indices.append(count)
+    with open('indices.pkl', 'wb') as f:
+        pickle.dump(indices, f)
+
+# with open('offsets.pkl', 'rb') as f:
+#     offsets = pickle.load(f)
+# compute_index_map('combined_data.jsonl', offsets, 0.8)
 
 class LeagueDataset(Dataset):
-    def __init__(self, jsonl_file, offsets_file):
+    def __init__(self, jsonl_file, offsets_file, indices_file):
         self.jsonl_file = jsonl_file
         with open(offsets_file, 'rb') as f:
             self.offsets = pickle.load(f)
-
+        with open(indices_file, 'rb') as f:
+            self.indices = pickle.load(f)
+        
     def __len__(self):
         """Return the total number of samples."""
-        return len(self.offsets)
+        return self.indices[-1] // 10
 
     def __getitem__(self, idx):
         """Retrieve a sample and its label by index."""
-        data = access_jsonl_by_offset(self.jsonl_file, self.offsets, idx)
+        # use binary search to find json index
+        index = bisect.bisect_right(self.indices, idx)
+        prev_elements = self.indices[index - 1] if index > 0 else 0
+        num_elements = self.indices[index] - prev_elements
+        cur_elements = idx - prev_elements
+        difference = num_elements - cur_elements - 1
+        data = access_jsonl_by_offset(self.jsonl_file, self.offsets, index)
+        stats = data['stats_per_minute']
         label = torch.tensor(data['winning_team'] == 'blue', dtype=torch.float)
-        x = [list(entry['blue'].values()) + list(entry['red'].values()) for entry in data['stats_per_minute']]
+        x = [
+            list(entry['blue'].values()) + list(entry['red'].values()) 
+            for entry in stats[:len(stats) - difference]
+            ]
         x = torch.tensor(x, dtype=torch.float32)
-        return x, label
-
+        return x, x.shape[0], len(stats), label
 
 def collate_fn(batch):
     """
@@ -72,7 +100,7 @@ def collate_fn(batch):
         padded_samples: Tensor of padded samples.
         labels: Tensor of labels.
     """
-    samples, labels = zip(*batch)
+    samples, lengths, total_lengths, labels = zip(*batch)
 
     # Pad sequences to the same length
     padded_samples = torch.nn.utils.rnn.pad_sequence(
@@ -81,7 +109,7 @@ def collate_fn(batch):
         padding_value=0
     )
     labels = torch.tensor(labels)
-    return padded_samples, labels
+    return padded_samples, lengths, total_lengths, labels
 
 # Example Usage
 

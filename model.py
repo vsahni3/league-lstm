@@ -3,8 +3,12 @@ import torch
 import torch.nn as nn
 from data import LeagueDataset
 import lightning as L
+from collections import defaultdict
+import matplotlib.pyplot as plt
 import config 
 config = config.get_league_config()
+
+
 class LSTM(L.LightningModule):
     def __init__(self, config):
         super().__init__()
@@ -40,8 +44,7 @@ class LSTM(L.LightningModule):
     
     def forward(self, x):
         # (b, seq_size, input_size)
-        batch_size = x.size()[0]
-        seq_size = x.size()[1]
+        batch_size, seq_size, _ = x.size()
         h_t = torch.zeros(batch_size, self.hidden_size).to(x.device)
         c_t = torch.zeros(batch_size, self.hidden_size).to(x.device)
         for t in range(seq_size):
@@ -56,6 +59,8 @@ class LeagueModel(L.LightningModule):
         self.final = nn.Linear(config.hidden_size, 1)
         self.sigmoid = torch.sigmoid 
         self.loss_fn = nn.BCEWithLogitsLoss()
+        self.length_stats = defaultdict(lambda: {"correct": 0, "count": 0})
+        self.prop_stats = defaultdict(lambda: {"correct": 0, "count": 0})
     def forward(self, x, labels=None):
         x = self.lstm(x)
         x = self.final(x).squeeze(-1)
@@ -66,15 +71,22 @@ class LeagueModel(L.LightningModule):
         return prob, self.loss_fn(x, labels)
 
     def training_step(self, batch, batch_idx):
-        x, labels = batch
+        x, _, _, labels = batch
         prob, loss = self(x, labels)
         self.log('train_loss', loss, on_epoch=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        x, labels = batch
+        x, lengths, total_lengths, labels = batch
         prob, loss = self(x, labels)
         acc = ((prob >= 0.5).float() == labels).float().mean()
+        for i, length in enumerate(lengths):
+            proportion = round((length / total_lengths[i]) * 20) / 20
+            res = ((prob[i] >= 0.5) == labels[i]).item()
+            self.length_stats[length]['correct'] += res
+            self.prop_stats[proportion]['correct'] += res
+            self.length_stats[length]['count'] += 1
+            self.prop_stats[proportion]['count'] += 1
         self.log('val_loss', loss)
         self.log('val_acc', acc)
 
@@ -91,7 +103,28 @@ class LeagueModel(L.LightningModule):
                 "monitor": "val_loss",
             },
         }
+    def on_validation_epoch_end(self):
+        if self.current_epoch % 5 == 0:
+            self.plot_length_accuracies(True)
+            self.plot_length_accuracies(False)
 
+    def plot_length_accuracies(self, is_abs):
+        stats_dict, key = (self.length_stats, 'length') if is_abs else (self.prop_stats, 'prop')
+        lengths = sorted(stats_dict.keys())
+        accuracies = [
+            stats_dict[length][f'correct'] / stats_dict[length][f"count"] 
+            if stats_dict[length][f"count"] > 0 else 0
+            for length in lengths
+        ]
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(lengths, accuracies, marker="o", label="Accuracy by Length")
+        plt.xlabel(f"Sequence {key}")
+        plt.ylabel("Accuracy")
+        plt.title(f"Accuracy by Sequence Length (Epoch {self.current_epoch})")
+        plt.legend()
+        plt.savefig(f'{key}.png')
+        plt.close()
 
 
 

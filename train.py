@@ -23,11 +23,13 @@ checkpoint_callback = ModelCheckpoint(
 
 logger = TensorBoardLogger(save_dir="lightning_logs", name="league_model")
 
-early_stopping = EarlyStopping(monitor="val_loss", patience=20, mode="min", verbose=False)
 
 model = LeagueModel(config)
 
-dataset = LeagueDataset('combined_data.jsonl', 'offsets.pkl')
+dataset = LeagueDataset('combined_data.jsonl', 'offsets.pkl', 'indices.pkl')
+# for i in range(30):
+#     print(dataset[i][0].shape, dataset[i][2], dataset[i][-1].item())
+
 
 train_size = int(0.8 * len(dataset))
 val_size = int(0.1 * len(dataset))
@@ -39,10 +41,11 @@ val_loader = DataLoader(val_dataset, collate_fn=collate_fn, batch_size=16, shuff
 test_loader = DataLoader(test_dataset, collate_fn=collate_fn, batch_size=16, shuffle=False)
 
 trainer = L.Trainer(
-   max_epochs=50,
-   callbacks=[checkpoint_callback, early_stopping],
+   max_epochs=100,
+   callbacks=[checkpoint_callback],
    logger=logger,
    accelerator="gpu" if torch.cuda.is_available() else "cpu",
    devices="auto",
 )
 trainer.fit(model, train_loader, val_loader)
+
